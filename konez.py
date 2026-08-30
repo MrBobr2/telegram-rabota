@@ -8,8 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from datetime import datetime
 
-TOKEN = "8974370964:AAH9WMk4et1sZGvL_Kmk1ohk4nLzCNzSwQk"  # Замените на ваш токен
-
+TOKEN = os.getenv("8974370964:AAH9WMk4et1sZGvL_Kmk1ohk4nLzCNzSwQk", "8974370964:AAH9WMk4et1sZGvL_Kmk1ohk4nLzCNzSwQk") 
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
