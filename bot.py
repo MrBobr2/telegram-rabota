@@ -9,6 +9,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from datetime import datetime
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill
+from io import BytesIO
 
 # ==================== ЛОГИРОВАНИЕ ====================
 logging.basicConfig(
@@ -176,6 +179,70 @@ def delete_task(task_id):
         logger.error(f"Ошибка удаления задачи (delete_task): {e}")
         raise
 
+# ==================== ЭКСПОРТ В EXCEL ====================
+
+def _fill_sheet(ws, tasks, include_completed=False):
+    """Заполняет лист Excel данными задач."""
+    headers = ["№", "Задача", "Пометка", "Дата добавления", "Перенесена в ожидание"]
+    if include_completed:
+        headers.append("Дата выполнения")
+    headers.append("Добавил (в БД)")
+
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for row_idx, task in enumerate(tasks, start=2):
+        ws.cell(row=row_idx, column=1, value=row_idx - 1)
+        ws.cell(row=row_idx, column=2, value=task['text'])
+        ws.cell(row=row_idx, column=3, value=task.get('note') or "")
+        ws.cell(row=row_idx, column=4, value=format_date(task['created_at']))
+        ws.cell(row=row_idx, column=5, value=format_date(task['moved_to_waiting_at']))
+
+        next_col = 6
+        if include_completed:
+            ws.cell(row=row_idx, column=next_col, value=format_date(task['completed_at']))
+            next_col += 1
+
+        ws.cell(row=row_idx, column=next_col, value=task.get('username') or "")
+
+    widths = [5, 50, 30, 20, 25]
+    if include_completed:
+        widths.append(20)
+    widths.append(20)
+
+    for col_idx, width in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
+
+    if tasks:
+        ws.auto_filter.ref = ws.dimensions
+    ws.freeze_panes = "A2"
+
+
+def create_excel_report(user_id):
+    """Создаёт Excel-файл со всеми задачами пользователя. Возвращает BytesIO."""
+    wb = Workbook()
+
+    ws_work = wb.active
+    ws_work.title = "В работе"
+    _fill_sheet(ws_work, get_tasks(user_id, "in_work"), include_completed=False)
+
+    ws_waiting = wb.create_sheet("В ожидании")
+    _fill_sheet(ws_waiting, get_tasks(user_id, "waiting"), include_completed=False)
+
+    ws_completed = wb.create_sheet("Выполненные")
+    _fill_sheet(ws_completed, get_tasks(user_id, "completed"), include_completed=True)
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
+
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 class TaskStates(StatesGroup):
@@ -185,7 +252,8 @@ def get_main_menu():
     kb = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔄 В работе"), KeyboardButton(text="⏸️ В ожидании")],
-            [KeyboardButton(text="✅ Выполненные"), KeyboardButton(text="🗑️ Удалить выполненные")]
+            [KeyboardButton(text="✅ Выполненные"), KeyboardButton(text="🗑️ Удалить выполненные")],
+            [KeyboardButton(text="📊 Экспорт в Excel")]
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие"
@@ -206,13 +274,10 @@ def get_username(message: types.Message) -> str:
 
 # ==================== ПАГИНАЦИЯ ====================
 
-PAGE_SIZE = 10  # количество задач на одной странице
+PAGE_SIZE = 10
 
 def build_paginated_keyboard(tasks, prefix, page=0, action_emoji="🗑️"):
-    """
-    Строит inline-клавиатуру с постраничным выводом.
-    prefix — префикс callback_data (например, 'delete', 'complete_work', 'waiting', 'addnote_work')
-    """
+    """Строит inline-клавиатуру с постраничным выводом."""
     total = len(tasks)
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
@@ -257,7 +322,8 @@ async def cmd_start(message: types.Message):
         f"👋 Привет, {user_name}!\n"
         f"Я бот для управления задачами.\n\n"
         f"📝 Отправьте мне сообщение с задачей.\n"
-        f"📌 Чтобы добавить пометку к заказу, используйте кнопку '📝 Пометка' в разделе задач.\n\n"
+        f"📌 Чтобы добавить пометку к заказу, используйте кнопку '📝 Пометка' в разделе задач.\n"
+        f"📊 Для выгрузки всех задач в Excel используйте кнопку 'Экспорт в Excel'.\n\n"
         f"Все задачи сохраняются в базе данных и не пропадают при перезагрузке.",
         reply_markup=get_main_menu()
     )
@@ -659,38 +725,36 @@ async def process_delete_completed(callback: types.CallbackQuery):
     )
     await callback.answer("Задача удалена")
 
-# ---------- Добавление новой задачи ----------
+# ---------- Экспорт в Excel ----------
 
-@dp.message()
-async def any_message(message: types.Message, state: FSMContext):
-    current_state = await state.get_state()
-    if message.text in ["🔄 В работе", "⏸️ В ожидании", "✅ Выполненные", "🗑️ Удалить выполненные"]:
-        if current_state == TaskStates.waiting_for_note.state:
-            await state.clear()
+@dp.message(F.text == "📊 Экспорт в Excel")
+async def export_to_excel(message: types.Message):
+    user_id = message.from_user.id
+
+    tasks_work = get_tasks(user_id, "in_work")
+    tasks_waiting = get_tasks(user_id, "waiting")
+    tasks_completed = get_tasks(user_id, "completed")
+
+    if not tasks_work and not tasks_waiting and not tasks_completed:
+        await message.answer("📭 У вас нет задач для экспорта.", reply_markup=get_main_menu())
         return
 
-    user_id = message.from_user.id
-    username = get_username(message)
-    add_task(user_id, username, message.text)
-    count = len(get_tasks(user_id, "in_work"))
+    await message.answer("⏳ Формирую Excel-файл...")
 
-    await message.answer(
-        f"📌 Задача '{message.text[:50]}...' добавлена в раздел 'В работе'!\n"
-        f"📅 Дата добавления: {format_date(datetime.now())}\n"
-        f"Всего задач в работе: {count}",
-        reply_markup=get_main_menu()
-    )
-
-# ==================== ЗАПУСК ====================
-
-async def main():
-    logger.info("🤖 Бот запущен!")
     try:
-        await dp.start_polling(bot)
+        buffer = create_excel_report(user_id)
     except Exception as e:
-        logger.error(f"Ошибка polling: {e}")
-        await asyncio.sleep(5)
-        await main()
+        logger.error(f"Ошибка создания Excel: {e}")
+        await message.answer("⚠️ Не удалось создать файл. Попробуйте позже.", reply_markup=get_main_menu())
+        return
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    filename = f"tasks_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    document = types.BufferedInputFile(buffer.read(), filename=filename)
+
+    total = len(tasks_work) + len(tasks_waiting) + len(tasks_completed)
+    await message.answer_document(
+        document=document,
+        caption=(
+            f"📊 **Экспорт задач**\n\n"
+            f"🔄 В работе: {len(tasks_work)}\n"
+            f
