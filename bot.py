@@ -1,6 +1,7 @@
 import asyncio
 import os
 import logging
+import sqlite3
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -13,23 +14,115 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Токен из переменных окружения Railway
-TOKEN = os.getenv("BOT_TOKEN", "")
+# Токен из переменных окружения
+TOKEN = os.getenv("8974370964:AAH9WMk4et1sZGvL_Kmk1ohk4nLzCNzSwQk", "")
 
 if not TOKEN:
     logger.error("BOT_TOKEN не установлен!")
     exit(1)
 
-# Создаем бота и диспетчер
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Определяем состояния
-class TaskStates(StatesGroup):
-    waiting_for_note = State()  # Ожидание пометки для задачи
+# ==================== РАБОТА С БАЗОЙ ДАННЫХ ====================
 
-# Создаем главное меню
+# Подключение к базе данных (файл создастся автоматически)
+conn = sqlite3.connect('tasks.db', check_same_thread=False)
+cursor = conn.cursor()
+
+# Создаем таблицу, если её нет
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        task_text TEXT,
+        status TEXT,
+        created_at TEXT,
+        moved_to_waiting_at TEXT,
+        completed_at TEXT,
+        note TEXT
+    )
+''')
+conn.commit()
+
+def add_task(user_id, task_text):
+    """Добавляет новую задачу в БД и возвращает её ID"""
+    now = datetime.now().isoformat()
+    cursor.execute(
+        'INSERT INTO tasks (user_id, task_text, status, created_at) VALUES (?, ?, ?, ?)',
+        (user_id, task_text, 'in_work', now)
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+def get_tasks(user_id, status):
+    """Возвращает список задач пользователя с определённым статусом"""
+    cursor.execute(
+        'SELECT id, task_text, created_at, moved_to_waiting_at, completed_at, note FROM tasks WHERE user_id = ? AND status = ? ORDER BY id',
+        (user_id, status)
+    )
+    rows = cursor.fetchall()
+    tasks = []
+    for row in rows:
+        tasks.append({
+            'id': row[0],
+            'text': row[1],
+            'created_at': datetime.fromisoformat(row[2]) if row[2] else None,
+            'moved_to_waiting_at': datetime.fromisoformat(row[3]) if row[3] else None,
+            'completed_at': datetime.fromisoformat(row[4]) if row[4] else None,
+            'note': row[5]
+        })
+    return tasks
+
+def get_task_by_id(task_id):
+    """Возвращает задачу по ID"""
+    cursor.execute(
+        'SELECT id, task_text, created_at, moved_to_waiting_at, completed_at, note, status FROM tasks WHERE id = ?',
+        (task_id,)
+    )
+    row = cursor.fetchone()
+    if row:
+        return {
+            'id': row[0],
+            'text': row[1],
+            'created_at': datetime.fromisoformat(row[2]) if row[2] else None,
+            'moved_to_waiting_at': datetime.fromisoformat(row[3]) if row[3] else None,
+            'completed_at': datetime.fromisoformat(row[4]) if row[4] else None,
+            'note': row[5],
+            'status': row[6]
+        }
+    return None
+
+def update_task_status(task_id, status, extra_field=None, extra_value=None):
+    """Обновляет статус задачи и опционально добавляет дату/пометку"""
+    if extra_field and extra_value is not None:
+        cursor.execute(
+            f'UPDATE tasks SET status = ?, {extra_field} = ? WHERE id = ?',
+            (status, extra_value, task_id)
+        )
+    else:
+        cursor.execute(
+            'UPDATE tasks SET status = ? WHERE id = ?',
+            (status, task_id)
+        )
+    conn.commit()
+
+def update_task_note(task_id, note):
+    """Обновляет пометку задачи"""
+    cursor.execute('UPDATE tasks SET note = ? WHERE id = ?', (note, task_id))
+    conn.commit()
+
+def delete_task(task_id):
+    """Удаляет задачу по ID"""
+    cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+    conn.commit()
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+
+class TaskStates(StatesGroup):
+    waiting_for_note = State()
+
 def get_main_menu():
     kb = ReplyKeyboardMarkup(
         keyboard=[
@@ -41,38 +134,23 @@ def get_main_menu():
     )
     return kb
 
-# Хранилище задач для каждого пользователя
-users_tasks = {}
-
-def get_user_data(user_id):
-    """Получает данные пользователя или создает новые"""
-    if user_id not in users_tasks:
-        users_tasks[user_id] = {
-            "in_work": [],
-            "waiting": [],
-            "completed": []
-        }
-    return users_tasks[user_id]
-
 def format_date(dt):
-    """Форматирует дату и время в читаемый вид"""
     if dt is None:
         return "Не указано"
     return dt.strftime("%d.%m.%Y %H:%M")
+
+# ==================== ОБРАБОТЧИКИ ====================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     user_name = message.from_user.first_name
-    
-    get_user_data(user_id)
-    
     await message.answer(
         f"👋 Привет, {user_name}!\n"
         f"Я бот для управления задачами.\n\n"
         f"📝 Отправьте мне сообщение с задачей.\n"
         f"📌 Чтобы добавить пометку к заказу, используйте кнопку '📝 Пометка' в разделе задач.\n\n"
-        f"Каждый пользователь видит только свои задачи.",
+        f"Все задачи сохраняются в базе данных и не пропадают при перезагрузке.",
         reply_markup=get_main_menu()
     )
 
@@ -80,174 +158,129 @@ async def cmd_start(message: types.Message):
 async def cmd_menu(message: types.Message):
     await message.answer("Главное меню:", reply_markup=get_main_menu())
 
-# Обработчик для кнопки "🔄 В работе"
+# ---------- Просмотр задач ----------
+
 @dp.message(F.text == "🔄 В работе")
 async def show_in_work(message: types.Message):
     user_id = message.from_user.id
-    user_data = get_user_data(user_id)
-    tasks_in_work = user_data["in_work"]
-    
-    if not tasks_in_work:
+    tasks = get_tasks(user_id, "in_work")
+    if not tasks:
         await message.answer("📭 Нет задач в работе.", reply_markup=get_main_menu())
         return
-    
+
     response = "🔄 **Задачи в работе:**\n\n"
-    for i, task in enumerate(tasks_in_work, 1):
+    for i, task in enumerate(tasks, 1):
         if task.get('note'):
             response += f"📌 **Пометка:** {task['note']}\n"
         response += f"{i}. {task['text']}\n"
         response += f"   📅 Добавлена: {format_date(task['created_at'])}\n\n"
-    
+
     inline_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Выполнить", callback_data="show_complete_work")],
         [InlineKeyboardButton(text="⏸️ В ожидание", callback_data="show_waiting_transfer")],
         [InlineKeyboardButton(text="📝 Пометка", callback_data="show_add_note_work")]
     ])
-    
     await message.answer(response, reply_markup=get_main_menu())
     await message.answer("Действия с задачами:", reply_markup=inline_kb)
 
-# Обработчик для кнопки "⏸️ В ожидании"
 @dp.message(F.text == "⏸️ В ожидании")
 async def show_waiting_tasks(message: types.Message):
     user_id = message.from_user.id
-    user_data = get_user_data(user_id)
-    tasks_waiting = user_data["waiting"]
-    
-    if not tasks_waiting:
+    tasks = get_tasks(user_id, "waiting")
+    if not tasks:
         await message.answer("📭 Нет задач в ожидании.", reply_markup=get_main_menu())
         return
-    
+
     response = "⏸️ **Задачи в ожидании:**\n\n"
-    for i, task in enumerate(tasks_waiting, 1):
+    for i, task in enumerate(tasks, 1):
         if task.get('note'):
             response += f"📌 **Пометка:** {task['note']}\n"
         response += f"{i}. {task['text']}\n"
         response += f"   📅 Добавлена: {format_date(task['created_at'])}\n"
         response += f"   ⏸️ Перенесена в ожидание: {format_date(task['moved_to_waiting_at'])}\n\n"
-    
+
     inline_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Выполнить", callback_data="show_complete_waiting")],
         [InlineKeyboardButton(text="📝 Пометка", callback_data="show_add_note_waiting")]
     ])
-    
     await message.answer(response, reply_markup=get_main_menu())
     await message.answer("Действия с задачами:", reply_markup=inline_kb)
 
-# Обработчик для кнопки "✅ Выполненные"
 @dp.message(F.text == "✅ Выполненные")
 async def show_completed_tasks(message: types.Message):
     user_id = message.from_user.id
-    user_data = get_user_data(user_id)
-    completed_tasks = user_data["completed"]
-    
-    if not completed_tasks:
+    tasks = get_tasks(user_id, "completed")
+    if not tasks:
         await message.answer("📭 Нет выполненных задач.", reply_markup=get_main_menu())
         return
-    
+
     response = "✅ **Выполненные задачи:**\n\n"
-    for i, task in enumerate(completed_tasks, 1):
+    for i, task in enumerate(tasks, 1):
         if task.get('note'):
             response += f"📌 **Пометка:** {task['note']}\n"
         response += f"{i}. {task['text']}\n"
         response += f"   📅 Добавлена: {format_date(task['created_at'])}\n"
         response += f"   ✅ Выполнена: {format_date(task['completed_at'])}\n\n"
-    
+
     inline_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📝 Пометка", callback_data="show_add_note_completed")]
     ])
-    
     await message.answer(response, reply_markup=get_main_menu())
     await message.answer("Действия с задачами:", reply_markup=inline_kb)
 
-# Обработчики для добавления пометок
+# ---------- Добавление пометок ----------
+
 @dp.callback_query(F.data == "show_add_note_work")
-async def show_add_note_work(callback: types.CallbackQuery, state: FSMContext):
+async def show_add_note_work(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    user_data = get_user_data(user_id)
-    tasks_in_work = user_data["in_work"]
-    
-    if not tasks_in_work:
+    tasks = get_tasks(user_id, "in_work")
+    if not tasks:
         await callback.answer("Нет задач в работе", show_alert=True)
         return
-    
     inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"📝 {task['text'][:30]}...", callback_data=f"addnote_work_{i}")]
-        for i, task in enumerate(tasks_in_work[:10])
+        [InlineKeyboardButton(text=f"📝 {task['text'][:30]}...", callback_data=f"addnote_work_{task['id']}")]
+        for task in tasks[:10]
     ])
-    
     await callback.message.answer("Выберите задачу для добавления пометки:", reply_markup=inline_kb)
     await callback.answer()
 
 @dp.callback_query(F.data == "show_add_note_waiting")
-async def show_add_note_waiting(callback: types.CallbackQuery, state: FSMContext):
+async def show_add_note_waiting(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    user_data = get_user_data(user_id)
-    tasks_waiting = user_data["waiting"]
-    
-    if not tasks_waiting:
+    tasks = get_tasks(user_id, "waiting")
+    if not tasks:
         await callback.answer("Нет задач в ожидании", show_alert=True)
         return
-    
     inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"📝 {task['text'][:30]}...", callback_data=f"addnote_waiting_{i}")]
-        for i, task in enumerate(tasks_waiting[:10])
+        [InlineKeyboardButton(text=f"📝 {task['text'][:30]}...", callback_data=f"addnote_waiting_{task['id']}")]
+        for task in tasks[:10]
     ])
-    
     await callback.message.answer("Выберите задачу для добавления пометки:", reply_markup=inline_kb)
     await callback.answer()
 
 @dp.callback_query(F.data == "show_add_note_completed")
-async def show_add_note_completed(callback: types.CallbackQuery, state: FSMContext):
+async def show_add_note_completed(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    user_data = get_user_data(user_id)
-    completed_tasks = user_data["completed"]
-    
-    if not completed_tasks:
+    tasks = get_tasks(user_id, "completed")
+    if not tasks:
         await callback.answer("Нет выполненных задач", show_alert=True)
         return
-    
     inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"📝 {task['text'][:30]}...", callback_data=f"addnote_completed_{i}")]
-        for i, task in enumerate(completed_tasks[:10])
+        [InlineKeyboardButton(text=f"📝 {task['text'][:30]}...", callback_data=f"addnote_completed_{task['id']}")]
+        for task in tasks[:10]
     ])
-    
     await callback.message.answer("Выберите задачу для добавления пометки:", reply_markup=inline_kb)
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("addnote_work_"))
-async def process_add_note_work(callback: types.CallbackQuery, state: FSMContext):
-    task_index = int(callback.data.split("_")[2])
-    
-    await state.update_data(task_location="in_work", task_index=task_index)
-    await state.set_state(TaskStates.waiting_for_note)
-    
-    await callback.message.answer(
-        "✏️ Напишите пометку для задачи:",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
-    await callback.answer()
+@dp.callback_query(F.data.startswith("addnote_"))
+async def process_add_note_choice(callback: types.CallbackQuery, state: FSMContext):
+    # callback.data вида: addnote_work_123, addnote_waiting_123, addnote_completed_123
+    parts = callback.data.split("_")
+    location = parts[1]  # work / waiting / completed
+    task_id = int(parts[2])
 
-@dp.callback_query(F.data.startswith("addnote_waiting_"))
-async def process_add_note_waiting(callback: types.CallbackQuery, state: FSMContext):
-    task_index = int(callback.data.split("_")[2])
-    
-    await state.update_data(task_location="waiting", task_index=task_index)
+    await state.update_data(task_id=task_id)
     await state.set_state(TaskStates.waiting_for_note)
-    
-    await callback.message.answer(
-        "✏️ Напишите пометку для задачи:",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("addnote_completed_"))
-async def process_add_note_completed(callback: types.CallbackQuery, state: FSMContext):
-    task_index = int(callback.data.split("_")[2])
-    
-    await state.update_data(task_location="completed", task_index=task_index)
-    await state.set_state(TaskStates.waiting_for_note)
-    
     await callback.message.answer(
         "✏️ Напишите пометку для задачи:",
         reply_markup=types.ReplyKeyboardRemove()
@@ -256,256 +289,205 @@ async def process_add_note_completed(callback: types.CallbackQuery, state: FSMCo
 
 @dp.message(TaskStates.waiting_for_note)
 async def process_add_note(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    user_data = get_user_data(user_id)
-    
-    state_data = await state.get_data()
-    task_location = state_data.get("task_location")
-    task_index = state_data.get("task_index")
-    
-    if task_location is None or task_index is None:
-        await state.clear()
-        await message.answer("⚠️ Ошибка. Попробуйте снова.", reply_markup=get_main_menu())
-        return
-    
     note_text = message.text.strip()
-    
     if not note_text:
         await message.answer(
             "⚠️ Пометка не может быть пустой. Напишите текст пометки:",
             reply_markup=types.ReplyKeyboardRemove()
         )
         return
-    
-    if task_location == "in_work":
-        task_list = user_data["in_work"]
-    elif task_location == "waiting":
-        task_list = user_data["waiting"]
-    elif task_location == "completed":
-        task_list = user_data["completed"]
-    else:
+
+    state_data = await state.get_data()
+    task_id = state_data.get("task_id")
+    if not task_id:
         await state.clear()
         await message.answer("⚠️ Ошибка. Попробуйте снова.", reply_markup=get_main_menu())
         return
-    
-    if task_index < len(task_list):
-        task = task_list[task_index]
-        task['note'] = note_text
-        
-        await message.answer(
-            f"✅ Пометка добавлена к задаче:\n"
-            f"📌 Пометка: {note_text}\n"
-            f"📝 Задача: {task['text']}",
-            reply_markup=get_main_menu()
-        )
-    else:
+
+    task = get_task_by_id(task_id)
+    if not task:
+        await state.clear()
         await message.answer("⚠️ Задача не найдена.", reply_markup=get_main_menu())
-    
+        return
+
+    update_task_note(task_id, note_text)
+    await message.answer(
+        f"✅ Пометка добавлена к задаче:\n"
+        f"📌 Пометка: {note_text}\n"
+        f"📝 Задача: {task['text']}",
+        reply_markup=get_main_menu()
+    )
     await state.clear()
 
-# Обработчики для inline кнопок
+# ---------- Выполнение задач ----------
+
 @dp.callback_query(F.data == "show_complete_work")
 async def show_complete_work(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    user_data = get_user_data(user_id)
-    tasks_in_work = user_data["in_work"]
-    
-    if not tasks_in_work:
+    tasks = get_tasks(user_id, "in_work")
+    if not tasks:
         await callback.answer("Нет задач в работе", show_alert=True)
         return
-    
     inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"✅ {task['text'][:30]}...", callback_data=f"complete_work_{i}")]
-        for i, task in enumerate(tasks_in_work[:10])
+        [InlineKeyboardButton(text=f"✅ {task['text'][:30]}...", callback_data=f"complete_work_{task['id']}")]
+        for task in tasks[:10]
     ])
-    
     await callback.message.answer("Выберите задачу для выполнения:", reply_markup=inline_kb)
     await callback.answer()
 
 @dp.callback_query(F.data == "show_complete_waiting")
 async def show_complete_waiting(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    user_data = get_user_data(user_id)
-    tasks_waiting = user_data["waiting"]
-    
-    if not tasks_waiting:
+    tasks = get_tasks(user_id, "waiting")
+    if not tasks:
         await callback.answer("Нет задач в ожидании", show_alert=True)
         return
-    
     inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"✅ {task['text'][:30]}...", callback_data=f"complete_waiting_{i}")]
-        for i, task in enumerate(tasks_waiting[:10])
+        [InlineKeyboardButton(text=f"✅ {task['text'][:30]}...", callback_data=f"complete_waiting_{task['id']}")]
+        for task in tasks[:10]
     ])
-    
     await callback.message.answer("Выберите задачу для выполнения:", reply_markup=inline_kb)
     await callback.answer()
+
+@dp.callback_query(F.data.startswith("complete_work_"))
+async def process_complete_work(callback: types.CallbackQuery):
+    task_id = int(callback.data.split("_")[2])
+    task = get_task_by_id(task_id)
+    if not task or task['status'] != 'in_work':
+        await callback.answer("⚠️ Задача не найдена", show_alert=True)
+        return
+
+    now = datetime.now()
+    # Удаляем пометку и переносим в выполненные
+    cursor.execute(
+        'UPDATE tasks SET status = ?, completed_at = ?, note = NULL WHERE id = ?',
+        ('completed', now.isoformat(), task_id)
+    )
+    conn.commit()
+
+    await callback.message.answer(
+        f"✅ Задача '{task['text']}' выполнена!\n"
+        f"📅 Дата выполнения: {format_date(now)}\n"
+        f"Осталось задач в работе: {len(get_tasks(callback.from_user.id, 'in_work'))}",
+        reply_markup=get_main_menu()
+    )
+    await callback.answer("Задача отмечена как выполненная")
+
+@dp.callback_query(F.data.startswith("complete_waiting_"))
+async def process_complete_waiting(callback: types.CallbackQuery):
+    task_id = int(callback.data.split("_")[2])
+    task = get_task_by_id(task_id)
+    if not task or task['status'] != 'waiting':
+        await callback.answer("⚠️ Задача не найдена", show_alert=True)
+        return
+
+    now = datetime.now()
+    # Удаляем пометку и переносим в выполненные
+    cursor.execute(
+        'UPDATE tasks SET status = ?, completed_at = ?, note = NULL WHERE id = ?',
+        ('completed', now.isoformat(), task_id)
+    )
+    conn.commit()
+
+    await callback.message.answer(
+        f"✅ Задача '{task['text']}' выполнена!\n"
+        f"📅 Дата выполнения: {format_date(now)}\n"
+        f"Осталось задач в ожидании: {len(get_tasks(callback.from_user.id, 'waiting'))}",
+        reply_markup=get_main_menu()
+    )
+    await callback.answer("Задача отмечена как выполненная")
+
+# ---------- Перенос в ожидание ----------
 
 @dp.callback_query(F.data == "show_waiting_transfer")
 async def show_waiting_transfer(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    user_data = get_user_data(user_id)
-    tasks_in_work = user_data["in_work"]
-    
-    if not tasks_in_work:
+    tasks = get_tasks(user_id, "in_work")
+    if not tasks:
         await callback.answer("Нет задач в работе", show_alert=True)
         return
-    
     inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"⏸️ {task['text'][:30]}...", callback_data=f"waiting_{i}")]
-        for i, task in enumerate(tasks_in_work[:10])
+        [InlineKeyboardButton(text=f"⏸️ {task['text'][:30]}...", callback_data=f"waiting_{task['id']}")]
+        for task in tasks[:10]
     ])
-    
     await callback.message.answer("Выберите задачу для переноса в ожидание:", reply_markup=inline_kb)
     await callback.answer()
 
-# Обработчики для выполнения задач
-@dp.callback_query(F.data.startswith("complete_work_"))
-async def process_complete_work(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    user_data = get_user_data(user_id)
-    tasks_in_work = user_data["in_work"]
-    completed_tasks = user_data["completed"]
-    
-    task_index = int(callback.data.split("_")[2])
-    
-    if task_index < len(tasks_in_work):
-        completed_task = tasks_in_work.pop(task_index)
-        completed_task['completed_at'] = datetime.now()
-        
-        if 'note' in completed_task:
-            del completed_task['note']
-        
-        completed_tasks.append(completed_task)
-        
-        response = f"✅ Задача '{completed_task['text']}' выполнена!\n"
-        response += f"📅 Дата выполнения: {format_date(completed_task['completed_at'])}\n"
-        response += f"Осталось задач в работе: {len(tasks_in_work)}"
-        
-        await callback.message.answer(response, reply_markup=get_main_menu())
-        await callback.answer("Задача отмечена как выполненная")
-    else:
-        await callback.answer("⚠️ Задача не найдена", show_alert=True)
-
-@dp.callback_query(F.data.startswith("complete_waiting_"))
-async def process_complete_waiting(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    user_data = get_user_data(user_id)
-    tasks_waiting = user_data["waiting"]
-    completed_tasks = user_data["completed"]
-    
-    task_index = int(callback.data.split("_")[2])
-    
-    if task_index < len(tasks_waiting):
-        completed_task = tasks_waiting.pop(task_index)
-        completed_task['completed_at'] = datetime.now()
-        
-        if 'note' in completed_task:
-            del completed_task['note']
-        
-        completed_tasks.append(completed_task)
-        
-        response = f"✅ Задача '{completed_task['text']}' выполнена!\n"
-        response += f"📅 Дата выполнения: {format_date(completed_task['completed_at'])}\n"
-        response += f"Осталось задач в ожидании: {len(tasks_waiting)}"
-        
-        await callback.message.answer(response, reply_markup=get_main_menu())
-        await callback.answer("Задача отмечена как выполненная")
-    else:
-        await callback.answer("⚠️ Задача не найдена", show_alert=True)
-
-# Обработчик для переноса задач в ожидание
 @dp.callback_query(F.data.startswith("waiting_"))
 async def process_move_to_waiting(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    user_data = get_user_data(user_id)
-    tasks_in_work = user_data["in_work"]
-    tasks_waiting = user_data["waiting"]
-    
-    task_index = int(callback.data.split("_")[1])
-    
-    if task_index < len(tasks_in_work):
-        waiting_task = tasks_in_work.pop(task_index)
-        waiting_task['moved_to_waiting_at'] = datetime.now()
-        tasks_waiting.append(waiting_task)
-        
-        response = f"⏸️ Задача '{waiting_task['text']}' перенесена в ожидание!\n"
-        response += f"📅 Дата переноса: {format_date(waiting_task['moved_to_waiting_at'])}\n"
-        if waiting_task.get('note'):
-            response += f"📌 Пометка: {waiting_task['note']}\n"
-        response += f"Задач в работе: {len(tasks_in_work)}\n"
-        response += f"Задач в ожидании: {len(tasks_waiting)}"
-        
-        await callback.message.answer(response, reply_markup=get_main_menu())
-        await callback.answer("Задача перенесена в ожидание")
-    else:
+    task_id = int(callback.data.split("_")[1])
+    task = get_task_by_id(task_id)
+    if not task or task['status'] != 'in_work':
         await callback.answer("⚠️ Задача не найдена", show_alert=True)
+        return
 
-# Обработчик для кнопки "🗑️ Удалить выполненные"
+    now = datetime.now()
+    update_task_status(task_id, 'waiting', 'moved_to_waiting_at', now.isoformat())
+
+    response = f"⏸️ Задача '{task['text']}' перенесена в ожидание!\n"
+    response += f"📅 Дата переноса: {format_date(now)}\n"
+    if task.get('note'):
+        response += f"📌 Пометка: {task['note']}\n"
+    response += f"Задач в работе: {len(get_tasks(callback.from_user.id, 'in_work'))}\n"
+    response += f"Задач в ожидании: {len(get_tasks(callback.from_user.id, 'waiting'))}"
+
+    await callback.message.answer(response, reply_markup=get_main_menu())
+    await callback.answer("Задача перенесена в ожидание")
+
+# ---------- Удаление выполненных ----------
+
 @dp.message(F.text == "🗑️ Удалить выполненные")
 async def delete_completed_tasks(message: types.Message):
     user_id = message.from_user.id
-    user_data = get_user_data(user_id)
-    completed_tasks = user_data["completed"]
-    
-    if not completed_tasks:
+    tasks = get_tasks(user_id, "completed")
+    if not tasks:
         await message.answer("⚠️ Нет выполненных задач для удаления.", reply_markup=get_main_menu())
         return
-    
+
     inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🗑️ {task['text'][:30]}...", callback_data=f"delete_{i}")]
-        for i, task in enumerate(completed_tasks[:10])
+        [InlineKeyboardButton(text=f"🗑️ {task['text'][:30]}...", callback_data=f"delete_{task['id']}")]
+        for task in tasks[:10]
     ])
-    
     await message.answer("Выберите задачу для удаления:", reply_markup=inline_kb)
 
 @dp.callback_query(F.data.startswith("delete_"))
 async def process_delete_completed(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    user_data = get_user_data(user_id)
-    completed_tasks = user_data["completed"]
-    
-    task_index = int(callback.data.split("_")[1])
-    
-    if task_index < len(completed_tasks):
-        deleted_task = completed_tasks.pop(task_index)
-        
-        await callback.message.answer(
-            f"🗑️ Задача '{deleted_task['text']}' удалена!\n"
-            f"Осталось выполненных задач: {len(completed_tasks)}",
-            reply_markup=get_main_menu()
-        )
-        await callback.answer("Задача удалена")
-    else:
+    task_id = int(callback.data.split("_")[1])
+    task = get_task_by_id(task_id)
+    if not task or task['status'] != 'completed':
         await callback.answer("⚠️ Задача не найдена", show_alert=True)
+        return
 
-# Обработчик для всех остальных сообщений
+    delete_task(task_id)
+    await callback.message.answer(
+        f"🗑️ Задача '{task['text']}' удалена!\n"
+        f"Осталось выполненных задач: {len(get_tasks(callback.from_user.id, 'completed'))}",
+        reply_markup=get_main_menu()
+    )
+    await callback.answer("Задача удалена")
+
+# ---------- Добавление новой задачи ----------
+
 @dp.message()
 async def any_message(message: types.Message, state: FSMContext):
-    """Обработчик для любых других сообщений"""
-    user_id = message.from_user.id
-    user_data = get_user_data(user_id)
     current_state = await state.get_state()
-    
     if message.text in ["🔄 В работе", "⏸️ В ожидании", "✅ Выполненные", "🗑️ Удалить выполненные"]:
         if current_state == TaskStates.waiting_for_note.state:
             await state.clear()
         return
-    
-    new_task = {
-        'text': message.text,
-        'created_at': datetime.now(),
-        'moved_to_waiting_at': None,
-        'completed_at': None,
-        'note': None
-    }
-    user_data["in_work"].append(new_task)
-    
+
+    user_id = message.from_user.id
+    add_task(user_id, message.text)
+    count = len(get_tasks(user_id, "in_work"))
+
     await message.answer(
         f"📌 Задача '{message.text[:50]}...' добавлена в раздел 'В работе'!\n"
-        f"📅 Дата добавления: {format_date(new_task['created_at'])}\n"
-        f"Всего задач в работе: {len(user_data['in_work'])}",
+        f"📅 Дата добавления: {format_date(datetime.now())}\n"
+        f"Всего задач в работе: {count}",
         reply_markup=get_main_menu()
     )
+
+# ==================== ЗАПУСК ====================
 
 async def main():
     logger.info("🤖 Бот запущен!")
