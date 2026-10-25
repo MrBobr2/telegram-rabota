@@ -727,6 +727,8 @@ async def process_delete_completed(callback: types.CallbackQuery):
 
 # ---------- Экспорт в Excel ----------
 
+# ---------- Экспорт в Excel ----------
+
 @dp.message(F.text == "📊 Экспорт в Excel")
 async def export_to_excel(message: types.Message):
     user_id = message.from_user.id
@@ -755,6 +757,51 @@ async def export_to_excel(message: types.Message):
     await message.answer_document(
         document=document,
         caption=(
-            f"📊 **Экспорт задач**\n\n"
+            f"📊 Экспорт задач\n\n"
             f"🔄 В работе: {len(tasks_work)}\n"
-            f
+            f"⏸️ В ожидании: {len(tasks_waiting)}\n"
+            f"✅ Выполнено: {len(tasks_completed)}\n"
+            f"📦 Всего: {total}"
+        ),
+        reply_markup=get_main_menu()
+    )
+    logger.info(f"Excel-экспорт для user_id={user_id}: {total} задач")
+
+# ---------- Добавление новой задачи ----------
+
+@dp.message()
+async def any_message(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if message.text in [
+        "🔄 В работе", "⏸️ В ожидании", "✅ Выполненные",
+        "🗑️ Удалить выполненные", "📊 Экспорт в Excel"
+    ]:
+        if current_state == TaskStates.waiting_for_note.state:
+            await state.clear()
+        return
+
+    user_id = message.from_user.id
+    username = get_username(message)
+    add_task(user_id, username, message.text)
+    count = len(get_tasks(user_id, "in_work"))
+
+    await message.answer(
+        f"📌 Задача '{message.text[:50]}...' добавлена в раздел 'В работе'!\n"
+        f"📅 Дата добавления: {format_date(datetime.now())}\n"
+        f"Всего задач в работе: {count}",
+        reply_markup=get_main_menu()
+    )
+
+# ==================== ЗАПУСК ====================
+
+async def main():
+    logger.info("🤖 Бот запущен!")
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"Ошибка polling: {e}")
+        await asyncio.sleep(5)
+        await main()
+
+if __name__ == "__main__":
+    asyncio.run(main())
