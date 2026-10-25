@@ -27,15 +27,15 @@ dp = Dispatcher(storage=storage)
 
 # ==================== РАБОТА С БАЗОЙ ДАННЫХ ====================
 
-# Подключение к базе данных (файл создастся автоматически)
 conn = sqlite3.connect('tasks.db', check_same_thread=False)
 cursor = conn.cursor()
 
-# Создаем таблицу, если её нет
+# Создаём таблицу, если её нет (добавлено поле username)
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
+        username TEXT,
         task_text TEXT,
         status TEXT,
         created_at TEXT,
@@ -46,12 +46,12 @@ cursor.execute('''
 ''')
 conn.commit()
 
-def add_task(user_id, task_text):
+def add_task(user_id, username, task_text):
     """Добавляет новую задачу в БД и возвращает её ID"""
     now = datetime.now().isoformat()
     cursor.execute(
-        'INSERT INTO tasks (user_id, task_text, status, created_at) VALUES (?, ?, ?, ?)',
-        (user_id, task_text, 'in_work', now)
+        'INSERT INTO tasks (user_id, username, task_text, status, created_at) VALUES (?, ?, ?, ?, ?)',
+        (user_id, username, task_text, 'in_work', now)
     )
     conn.commit()
     return cursor.lastrowid
@@ -59,7 +59,7 @@ def add_task(user_id, task_text):
 def get_tasks(user_id, status):
     """Возвращает список задач пользователя с определённым статусом"""
     cursor.execute(
-        'SELECT id, task_text, created_at, moved_to_waiting_at, completed_at, note FROM tasks WHERE user_id = ? AND status = ? ORDER BY id',
+        'SELECT id, task_text, created_at, moved_to_waiting_at, completed_at, note, username FROM tasks WHERE user_id = ? AND status = ? ORDER BY id',
         (user_id, status)
     )
     rows = cursor.fetchall()
@@ -71,14 +71,15 @@ def get_tasks(user_id, status):
             'created_at': datetime.fromisoformat(row[2]) if row[2] else None,
             'moved_to_waiting_at': datetime.fromisoformat(row[3]) if row[3] else None,
             'completed_at': datetime.fromisoformat(row[4]) if row[4] else None,
-            'note': row[5]
+            'note': row[5],
+            'username': row[6]
         })
     return tasks
 
 def get_task_by_id(task_id):
     """Возвращает задачу по ID"""
     cursor.execute(
-        'SELECT id, task_text, created_at, moved_to_waiting_at, completed_at, note, status FROM tasks WHERE id = ?',
+        'SELECT id, task_text, created_at, moved_to_waiting_at, completed_at, note, status, username FROM tasks WHERE id = ?',
         (task_id,)
     )
     row = cursor.fetchone()
@@ -90,7 +91,8 @@ def get_task_by_id(task_id):
             'moved_to_waiting_at': datetime.fromisoformat(row[3]) if row[3] else None,
             'completed_at': datetime.fromisoformat(row[4]) if row[4] else None,
             'note': row[5],
-            'status': row[6]
+            'status': row[6],
+            'username': row[7]
         }
     return None
 
@@ -139,11 +141,18 @@ def format_date(dt):
         return "Не указано"
     return dt.strftime("%d.%m.%Y %H:%M")
 
+def get_username(message: types.Message) -> str:
+    """Возвращает имя пользователя: имя или username"""
+    if message.from_user.first_name:
+        return message.from_user.first_name
+    if message.from_user.username:
+        return f"@{message.from_user.username}"
+    return f"User {message.from_user.id}"
+
 # ==================== ОБРАБОТЧИКИ ====================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    user_id = message.from_user.id
     user_name = message.from_user.first_name
     await message.answer(
         f"👋 Привет, {user_name}!\n"
@@ -173,6 +182,7 @@ async def show_in_work(message: types.Message):
         if task.get('note'):
             response += f"📌 **Пометка:** {task['note']}\n"
         response += f"{i}. {task['text']}\n"
+        response += f"   👤 Добавил: {task['username']}\n"
         response += f"   📅 Добавлена: {format_date(task['created_at'])}\n\n"
 
     inline_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -196,6 +206,7 @@ async def show_waiting_tasks(message: types.Message):
         if task.get('note'):
             response += f"📌 **Пометка:** {task['note']}\n"
         response += f"{i}. {task['text']}\n"
+        response += f"   👤 Добавил: {task['username']}\n"
         response += f"   📅 Добавлена: {format_date(task['created_at'])}\n"
         response += f"   ⏸️ Перенесена в ожидание: {format_date(task['moved_to_waiting_at'])}\n\n"
 
@@ -219,6 +230,7 @@ async def show_completed_tasks(message: types.Message):
         if task.get('note'):
             response += f"📌 **Пометка:** {task['note']}\n"
         response += f"{i}. {task['text']}\n"
+        response += f"   👤 Добавил: {task['username']}\n"
         response += f"   📅 Добавлена: {format_date(task['created_at'])}\n"
         response += f"   ✅ Выполнена: {format_date(task['completed_at'])}\n\n"
 
@@ -274,9 +286,7 @@ async def show_add_note_completed(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("addnote_"))
 async def process_add_note_choice(callback: types.CallbackQuery, state: FSMContext):
-    # callback.data вида: addnote_work_123, addnote_waiting_123, addnote_completed_123
     parts = callback.data.split("_")
-    location = parts[1]  # work / waiting / completed
     task_id = int(parts[2])
 
     await state.update_data(task_id=task_id)
@@ -358,7 +368,6 @@ async def process_complete_work(callback: types.CallbackQuery):
         return
 
     now = datetime.now()
-    # Удаляем пометку и переносим в выполненные
     cursor.execute(
         'UPDATE tasks SET status = ?, completed_at = ?, note = NULL WHERE id = ?',
         ('completed', now.isoformat(), task_id)
@@ -382,7 +391,6 @@ async def process_complete_waiting(callback: types.CallbackQuery):
         return
 
     now = datetime.now()
-    # Удаляем пометку и переносим в выполненные
     cursor.execute(
         'UPDATE tasks SET status = ?, completed_at = ?, note = NULL WHERE id = ?',
         ('completed', now.isoformat(), task_id)
@@ -477,11 +485,13 @@ async def any_message(message: types.Message, state: FSMContext):
         return
 
     user_id = message.from_user.id
-    add_task(user_id, message.text)
+    username = get_username(message)
+    add_task(user_id, username, message.text)
     count = len(get_tasks(user_id, "in_work"))
 
     await message.answer(
         f"📌 Задача '{message.text[:50]}...' добавлена в раздел 'В работе'!\n"
+        f"👤 Добавил: {username}\n"
         f"📅 Дата добавления: {format_date(datetime.now())}\n"
         f"Всего задач в работе: {count}",
         reply_markup=get_main_menu()
