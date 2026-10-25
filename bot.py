@@ -30,7 +30,7 @@ dp = Dispatcher(storage=storage)
 conn = sqlite3.connect('tasks.db', check_same_thread=False)
 cursor = conn.cursor()
 
-# Создаём таблицу, если её нет (добавлено поле username)
+# Создаём таблицу, если её нет
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,7 +142,7 @@ def format_date(dt):
     return dt.strftime("%d.%m.%Y %H:%M")
 
 def get_username(message: types.Message) -> str:
-    """Возвращает имя пользователя: имя или username"""
+    """Возвращает имя пользователя для сохранения в БД (в чат не выводится)"""
     if message.from_user.first_name:
         return message.from_user.first_name
     if message.from_user.username:
@@ -182,7 +182,6 @@ async def show_in_work(message: types.Message):
         if task.get('note'):
             response += f"📌 **Пометка:** {task['note']}\n"
         response += f"{i}. {task['text']}\n"
-        response += f"   👤 Добавил: {task['username']}\n"
         response += f"   📅 Добавлена: {format_date(task['created_at'])}\n\n"
 
     inline_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -206,7 +205,6 @@ async def show_waiting_tasks(message: types.Message):
         if task.get('note'):
             response += f"📌 **Пометка:** {task['note']}\n"
         response += f"{i}. {task['text']}\n"
-        response += f"   👤 Добавил: {task['username']}\n"
         response += f"   📅 Добавлена: {format_date(task['created_at'])}\n"
         response += f"   ⏸️ Перенесена в ожидание: {format_date(task['moved_to_waiting_at'])}\n\n"
 
@@ -230,7 +228,6 @@ async def show_completed_tasks(message: types.Message):
         if task.get('note'):
             response += f"📌 **Пометка:** {task['note']}\n"
         response += f"{i}. {task['text']}\n"
-        response += f"   👤 Добавил: {task['username']}\n"
         response += f"   📅 Добавлена: {format_date(task['created_at'])}\n"
         response += f"   ✅ Выполнена: {format_date(task['completed_at'])}\n\n"
 
@@ -491,7 +488,6 @@ async def any_message(message: types.Message, state: FSMContext):
 
     await message.answer(
         f"📌 Задача '{message.text[:50]}...' добавлена в раздел 'В работе'!\n"
-        f"👤 Добавил: {username}\n"
         f"📅 Дата добавления: {format_date(datetime.now())}\n"
         f"Всего задач в работе: {count}",
         reply_markup=get_main_menu()
