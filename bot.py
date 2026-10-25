@@ -182,11 +182,10 @@ def delete_task(task_id):
 # ==================== ЭКСПОРТ В EXCEL ====================
 
 def _fill_sheet(ws, tasks, include_completed=False):
-    """Заполняет лист Excel данными задач."""
+    """Заполняет лист Excel данными задач (без столбца «Добавил в БД»)."""
     headers = ["№", "Задача", "Пометка", "Дата добавления", "Перенесена в ожидание"]
     if include_completed:
         headers.append("Дата выполнения")
-    headers.append("Добавил (в БД)")
 
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF")
@@ -204,17 +203,12 @@ def _fill_sheet(ws, tasks, include_completed=False):
         ws.cell(row=row_idx, column=4, value=format_date(task['created_at']))
         ws.cell(row=row_idx, column=5, value=format_date(task['moved_to_waiting_at']))
 
-        next_col = 6
         if include_completed:
-            ws.cell(row=row_idx, column=next_col, value=format_date(task['completed_at']))
-            next_col += 1
-
-        ws.cell(row=row_idx, column=next_col, value=task.get('username') or "")
+            ws.cell(row=row_idx, column=6, value=format_date(task['completed_at']))
 
     widths = [5, 50, 30, 20, 25]
     if include_completed:
         widths.append(20)
-    widths.append(20)
 
     for col_idx, width in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
@@ -727,8 +721,6 @@ async def process_delete_completed(callback: types.CallbackQuery):
 
 # ---------- Экспорт в Excel ----------
 
-# ---------- Экспорт в Excel ----------
-
 @dp.message(F.text == "📊 Экспорт в Excel")
 async def export_to_excel(message: types.Message):
     user_id = message.from_user.id
@@ -760,48 +752,4 @@ async def export_to_excel(message: types.Message):
             f"📊 Экспорт задач\n\n"
             f"🔄 В работе: {len(tasks_work)}\n"
             f"⏸️ В ожидании: {len(tasks_waiting)}\n"
-            f"✅ Выполнено: {len(tasks_completed)}\n"
-            f"📦 Всего: {total}"
-        ),
-        reply_markup=get_main_menu()
-    )
-    logger.info(f"Excel-экспорт для user_id={user_id}: {total} задач")
-
-# ---------- Добавление новой задачи ----------
-
-@dp.message()
-async def any_message(message: types.Message, state: FSMContext):
-    current_state = await state.get_state()
-    if message.text in [
-        "🔄 В работе", "⏸️ В ожидании", "✅ Выполненные",
-        "🗑️ Удалить выполненные", "📊 Экспорт в Excel"
-    ]:
-        if current_state == TaskStates.waiting_for_note.state:
-            await state.clear()
-        return
-
-    user_id = message.from_user.id
-    username = get_username(message)
-    add_task(user_id, username, message.text)
-    count = len(get_tasks(user_id, "in_work"))
-
-    await message.answer(
-        f"📌 Задача '{message.text[:50]}...' добавлена в раздел 'В работе'!\n"
-        f"📅 Дата добавления: {format_date(datetime.now())}\n"
-        f"Всего задач в работе: {count}",
-        reply_markup=get_main_menu()
-    )
-
-# ==================== ЗАПУСК ====================
-
-async def main():
-    logger.info("🤖 Бот запущен!")
-    try:
-        await dp.start_polling(bot)
-    except Exception as e:
-        logger.error(f"Ошибка polling: {e}")
-        await asyncio.sleep(5)
-        await main()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+            f"✅ Выполнено: {len(tasks_completed)}\n
