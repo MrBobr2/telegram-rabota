@@ -24,10 +24,8 @@ if not TOKEN:
     exit(1)
 
 # ==================== БАЗА ДАННЫХ ====================
-# Платный тариф Railway: используем постоянный Volume, примонтированный в /data
 DB_PATH = "/data/tasks.db"
 
-# Проверяем, что папка /data существует и доступна на запись
 db_dir = os.path.dirname(DB_PATH)
 if db_dir and not os.path.exists(db_dir):
     logger.warning(f"Папка {db_dir} не найдена. Пробую создать...")
@@ -44,7 +42,6 @@ except Exception as e:
     logger.error(f"Не удалось открыть БД {DB_PATH}: {e}")
     exit(1)
 
-# Создаём таблицу, если её нет
 try:
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS tasks (
@@ -64,7 +61,6 @@ try:
 except Exception as e:
     logger.error(f"Ошибка при создании таблицы tasks: {e}")
 
-# Проверяем схему — есть ли поле username (на случай старой базы)
 try:
     cursor.execute("PRAGMA table_info(tasks)")
     columns = [row[1] for row in cursor.fetchall()]
@@ -81,7 +77,6 @@ except Exception as e:
 # ==================== ФУНКЦИИ РАБОТЫ С БД ====================
 
 def add_task(user_id, username, task_text):
-    """Добавляет новую задачу в БД и возвращает её ID"""
     now = datetime.now().isoformat()
     try:
         cursor.execute(
@@ -97,7 +92,6 @@ def add_task(user_id, username, task_text):
         raise
 
 def get_tasks(user_id, status):
-    """Возвращает список задач пользователя с определённым статусом"""
     try:
         cursor.execute(
             'SELECT id, task_text, created_at, moved_to_waiting_at, completed_at, note, username '
@@ -123,7 +117,6 @@ def get_tasks(user_id, status):
         return []
 
 def get_task_by_id(task_id):
-    """Возвращает задачу по ID"""
     try:
         cursor.execute(
             'SELECT id, task_text, created_at, moved_to_waiting_at, completed_at, note, status, username '
@@ -148,7 +141,6 @@ def get_task_by_id(task_id):
         return None
 
 def update_task_status(task_id, status, extra_field=None, extra_value=None):
-    """Обновляет статус задачи и опционально добавляет дату/пометку"""
     try:
         if extra_field and extra_value is not None:
             cursor.execute(
@@ -167,7 +159,6 @@ def update_task_status(task_id, status, extra_field=None, extra_value=None):
         raise
 
 def update_task_note(task_id, note):
-    """Обновляет пометку задачи"""
     try:
         cursor.execute('UPDATE tasks SET note = ? WHERE id = ?', (note, task_id))
         conn.commit()
@@ -177,7 +168,6 @@ def update_task_note(task_id, note):
         raise
 
 def delete_task(task_id):
-    """Удаляет задачу по ID"""
     try:
         cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
         conn.commit()
@@ -208,12 +198,50 @@ def format_date(dt):
     return dt.strftime("%d.%m.%Y %H:%M")
 
 def get_username(message: types.Message) -> str:
-    """Возвращает имя пользователя для сохранения в БД (в чат не выводится)"""
     if message.from_user.first_name:
         return message.from_user.first_name
     if message.from_user.username:
         return f"@{message.from_user.username}"
     return f"User {message.from_user.id}"
+
+# ==================== ПАГИНАЦИЯ ====================
+
+PAGE_SIZE = 10  # количество задач на одной странице
+
+def build_paginated_keyboard(tasks, prefix, page=0, action_emoji="🗑️"):
+    """
+    Строит inline-клавиатуру с постраничным выводом.
+    prefix — префикс callback_data (например, 'delete', 'complete_work', 'waiting', 'addnote_work')
+    """
+    total = len(tasks)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    page_tasks = tasks[start:end]
+
+    keyboard = []
+    for task in page_tasks:
+        text = f"{action_emoji} {task['text'][:40]}"
+        if len(task['text']) > 40:
+            text += "..."
+        keyboard.append([InlineKeyboardButton(text=text, callback_data=f"{prefix}_{task['id']}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{prefix}_{page - 1}"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"page_{prefix}_{page + 1}"))
+    if nav_row:
+        keyboard.append(nav_row)
+
+    keyboard.append([InlineKeyboardButton(
+        text=f"Стр. {page + 1} из {total_pages} (всего {total})",
+        callback_data="noop"
+    )])
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ==================== БОТ И ДИСПЕТЧЕР ====================
 bot = Bot(token=TOKEN)
@@ -308,7 +336,13 @@ async def show_completed_tasks(message: types.Message):
     await message.answer(response, reply_markup=get_main_menu())
     await message.answer("Действия с задачами:", reply_markup=inline_kb)
 
-# ---------- Добавление пометок ----------
+# ---------- Заглушка для noop ----------
+
+@dp.callback_query(F.data == "noop")
+async def noop(callback: types.CallbackQuery):
+    await callback.answer()
+
+# ---------- Пометки: показ списка ----------
 
 @dp.callback_query(F.data == "show_add_note_work")
 async def show_add_note_work(callback: types.CallbackQuery):
@@ -317,10 +351,7 @@ async def show_add_note_work(callback: types.CallbackQuery):
     if not tasks:
         await callback.answer("Нет задач в работе", show_alert=True)
         return
-    inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"📝 {task['text'][:30]}...", callback_data=f"addnote_work_{task['id']}")]
-        for task in tasks[:10]
-    ])
+    inline_kb = build_paginated_keyboard(tasks, "addnote_work", page=0, action_emoji="📝")
     await callback.message.answer("Выберите задачу для добавления пометки:", reply_markup=inline_kb)
     await callback.answer()
 
@@ -331,10 +362,7 @@ async def show_add_note_waiting(callback: types.CallbackQuery):
     if not tasks:
         await callback.answer("Нет задач в ожидании", show_alert=True)
         return
-    inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"📝 {task['text'][:30]}...", callback_data=f"addnote_waiting_{task['id']}")]
-        for task in tasks[:10]
-    ])
+    inline_kb = build_paginated_keyboard(tasks, "addnote_waiting", page=0, action_emoji="📝")
     await callback.message.answer("Выберите задачу для добавления пометки:", reply_markup=inline_kb)
     await callback.answer()
 
@@ -345,12 +373,49 @@ async def show_add_note_completed(callback: types.CallbackQuery):
     if not tasks:
         await callback.answer("Нет выполненных задач", show_alert=True)
         return
-    inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"📝 {task['text'][:30]}...", callback_data=f"addnote_completed_{task['id']}")]
-        for task in tasks[:10]
-    ])
+    inline_kb = build_paginated_keyboard(tasks, "addnote_completed", page=0, action_emoji="📝")
     await callback.message.answer("Выберите задачу для добавления пометки:", reply_markup=inline_kb)
     await callback.answer()
+
+# ---------- Пометки: пагинация ----------
+
+@dp.callback_query(F.data.startswith("page_addnote_work_"))
+async def paginate_addnote_work(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    page = int(callback.data.split("_")[3])
+    tasks = get_tasks(user_id, "in_work")
+    if not tasks:
+        await callback.answer("Нет задач в работе", show_alert=True)
+        return
+    inline_kb = build_paginated_keyboard(tasks, "addnote_work", page=page, action_emoji="📝")
+    await callback.message.edit_reply_markup(reply_markup=inline_kb)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("page_addnote_waiting_"))
+async def paginate_addnote_waiting(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    page = int(callback.data.split("_")[3])
+    tasks = get_tasks(user_id, "waiting")
+    if not tasks:
+        await callback.answer("Нет задач в ожидании", show_alert=True)
+        return
+    inline_kb = build_paginated_keyboard(tasks, "addnote_waiting", page=page, action_emoji="📝")
+    await callback.message.edit_reply_markup(reply_markup=inline_kb)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("page_addnote_completed_"))
+async def paginate_addnote_completed(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    page = int(callback.data.split("_")[3])
+    tasks = get_tasks(user_id, "completed")
+    if not tasks:
+        await callback.answer("Нет выполненных задач", show_alert=True)
+        return
+    inline_kb = build_paginated_keyboard(tasks, "addnote_completed", page=page, action_emoji="📝")
+    await callback.message.edit_reply_markup(reply_markup=inline_kb)
+    await callback.answer()
+
+# ---------- Пометки: выбор задачи и ввод ----------
 
 @dp.callback_query(F.data.startswith("addnote_"))
 async def process_add_note_choice(callback: types.CallbackQuery, state: FSMContext):
@@ -397,7 +462,7 @@ async def process_add_note(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
-# ---------- Выполнение задач ----------
+# ---------- Выполнение: показ списка ----------
 
 @dp.callback_query(F.data == "show_complete_work")
 async def show_complete_work(callback: types.CallbackQuery):
@@ -406,10 +471,7 @@ async def show_complete_work(callback: types.CallbackQuery):
     if not tasks:
         await callback.answer("Нет задач в работе", show_alert=True)
         return
-    inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"✅ {task['text'][:30]}...", callback_data=f"complete_work_{task['id']}")]
-        for task in tasks[:10]
-    ])
+    inline_kb = build_paginated_keyboard(tasks, "complete_work", page=0, action_emoji="✅")
     await callback.message.answer("Выберите задачу для выполнения:", reply_markup=inline_kb)
     await callback.answer()
 
@@ -420,12 +482,37 @@ async def show_complete_waiting(callback: types.CallbackQuery):
     if not tasks:
         await callback.answer("Нет задач в ожидании", show_alert=True)
         return
-    inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"✅ {task['text'][:30]}...", callback_data=f"complete_waiting_{task['id']}")]
-        for task in tasks[:10]
-    ])
+    inline_kb = build_paginated_keyboard(tasks, "complete_waiting", page=0, action_emoji="✅")
     await callback.message.answer("Выберите задачу для выполнения:", reply_markup=inline_kb)
     await callback.answer()
+
+# ---------- Выполнение: пагинация ----------
+
+@dp.callback_query(F.data.startswith("page_complete_work_"))
+async def paginate_complete_work(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    page = int(callback.data.split("_")[3])
+    tasks = get_tasks(user_id, "in_work")
+    if not tasks:
+        await callback.answer("Нет задач в работе", show_alert=True)
+        return
+    inline_kb = build_paginated_keyboard(tasks, "complete_work", page=page, action_emoji="✅")
+    await callback.message.edit_reply_markup(reply_markup=inline_kb)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("page_complete_waiting_"))
+async def paginate_complete_waiting(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    page = int(callback.data.split("_")[3])
+    tasks = get_tasks(user_id, "waiting")
+    if not tasks:
+        await callback.answer("Нет задач в ожидании", show_alert=True)
+        return
+    inline_kb = build_paginated_keyboard(tasks, "complete_waiting", page=page, action_emoji="✅")
+    await callback.message.edit_reply_markup(reply_markup=inline_kb)
+    await callback.answer()
+
+# ---------- Выполнение: обработка выбора ----------
 
 @dp.callback_query(F.data.startswith("complete_work_"))
 async def process_complete_work(callback: types.CallbackQuery):
@@ -485,7 +572,7 @@ async def process_complete_waiting(callback: types.CallbackQuery):
     )
     await callback.answer("Задача отмечена как выполненная")
 
-# ---------- Перенос в ожидание ----------
+# ---------- Перенос в ожидание: показ и пагинация ----------
 
 @dp.callback_query(F.data == "show_waiting_transfer")
 async def show_waiting_transfer(callback: types.CallbackQuery):
@@ -494,11 +581,20 @@ async def show_waiting_transfer(callback: types.CallbackQuery):
     if not tasks:
         await callback.answer("Нет задач в работе", show_alert=True)
         return
-    inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"⏸️ {task['text'][:30]}...", callback_data=f"waiting_{task['id']}")]
-        for task in tasks[:10]
-    ])
+    inline_kb = build_paginated_keyboard(tasks, "waiting", page=0, action_emoji="⏸️")
     await callback.message.answer("Выберите задачу для переноса в ожидание:", reply_markup=inline_kb)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("page_waiting_"))
+async def paginate_waiting(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    page = int(callback.data.split("_")[2])
+    tasks = get_tasks(user_id, "in_work")
+    if not tasks:
+        await callback.answer("Нет задач в работе", show_alert=True)
+        return
+    inline_kb = build_paginated_keyboard(tasks, "waiting", page=page, action_emoji="⏸️")
+    await callback.message.edit_reply_markup(reply_markup=inline_kb)
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("waiting_"))
@@ -522,7 +618,7 @@ async def process_move_to_waiting(callback: types.CallbackQuery):
     await callback.message.answer(response, reply_markup=get_main_menu())
     await callback.answer("Задача перенесена в ожидание")
 
-# ---------- Удаление выполненных ----------
+# ---------- Удаление выполненных: показ и пагинация ----------
 
 @dp.message(F.text == "🗑️ Удалить выполненные")
 async def delete_completed_tasks(message: types.Message):
@@ -532,11 +628,20 @@ async def delete_completed_tasks(message: types.Message):
         await message.answer("⚠️ Нет выполненных задач для удаления.", reply_markup=get_main_menu())
         return
 
-    inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🗑️ {task['text'][:30]}...", callback_data=f"delete_{task['id']}")]
-        for task in tasks[:10]
-    ])
+    inline_kb = build_paginated_keyboard(tasks, "delete", page=0, action_emoji="🗑️")
     await message.answer("Выберите задачу для удаления:", reply_markup=inline_kb)
+
+@dp.callback_query(F.data.startswith("page_delete_"))
+async def paginate_delete(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    page = int(callback.data.split("_")[2])
+    tasks = get_tasks(user_id, "completed")
+    if not tasks:
+        await callback.answer("Нет выполненных задач", show_alert=True)
+        return
+    inline_kb = build_paginated_keyboard(tasks, "delete", page=page, action_emoji="🗑️")
+    await callback.message.edit_reply_markup(reply_markup=inline_kb)
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("delete_"))
 async def process_delete_completed(callback: types.CallbackQuery):
