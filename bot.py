@@ -752,4 +752,4 @@ async def export_to_excel(message: types.Message):
             f"📊 Экспорт задач\n\n"
             f"🔄 В работе: {len(tasks_work)}\n"
             f"⏸️ В ожидании: {len(tasks_waiting)}\n"
-            f"✅ Выполнено: {len(tasks_completed)}\n
+            f"✅ Выполнено: {len(tasks_completed)}\n"
