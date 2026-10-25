@@ -10,115 +10,181 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from datetime import datetime
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
+# ==================== ЛОГИРОВАНИЕ ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-# Токен из переменных окружения
+# ==================== ТОКЕН ====================
 TOKEN = os.getenv("BOT_TOKEN", "")
-
 if not TOKEN:
-    logger.error("BOT_TOKEN не установлен!")
+    logger.error("BOT_TOKEN не установлен! Добавьте переменную окружения BOT_TOKEN в Railway.")
     exit(1)
 
-bot = Bot(token=TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+# ==================== БАЗА ДАННЫХ ====================
+# Платный тариф Railway: используем постоянный Volume, примонтированный в /data
+DB_PATH = "/data/tasks.db"
 
-# ==================== РАБОТА С БАЗОЙ ДАННЫХ ====================
+# Проверяем, что папка /data существует и доступна на запись
+db_dir = os.path.dirname(DB_PATH)
+if db_dir and not os.path.exists(db_dir):
+    logger.warning(f"Папка {db_dir} не найдена. Пробую создать...")
+    try:
+        os.makedirs(db_dir, exist_ok=True)
+    except Exception as e:
+        logger.error(f"Не удалось создать папку {db_dir}: {e}. Проверьте, что Volume примонтирован.")
 
-conn = sqlite3.connect('/data/tasks.db', check_same_thread=False)
-cursor = conn.cursor()
+try:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    cursor = conn.cursor()
+    logger.info(f"Подключение к БД установлено: {DB_PATH}")
+except Exception as e:
+    logger.error(f"Не удалось открыть БД {DB_PATH}: {e}")
+    exit(1)
 
 # Создаём таблицу, если её нет
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        username TEXT,
-        task_text TEXT,
-        status TEXT,
-        created_at TEXT,
-        moved_to_waiting_at TEXT,
-        completed_at TEXT,
-        note TEXT
-    )
-''')
-conn.commit()
+try:
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            task_text TEXT,
+            status TEXT,
+            created_at TEXT,
+            moved_to_waiting_at TEXT,
+            completed_at TEXT,
+            note TEXT
+        )
+    ''')
+    conn.commit()
+    logger.info("Таблица tasks готова.")
+except Exception as e:
+    logger.error(f"Ошибка при создании таблицы tasks: {e}")
+
+# Проверяем схему — есть ли поле username (на случай старой базы)
+try:
+    cursor.execute("PRAGMA table_info(tasks)")
+    columns = [row[1] for row in cursor.fetchall()]
+    logger.info(f"Колонки в таблице tasks: {columns}")
+    if "username" not in columns:
+        logger.warning("В таблице tasks нет колонки username. Выполняю миграцию...")
+        cursor.execute("ALTER TABLE tasks ADD COLUMN username TEXT")
+        cursor.execute("UPDATE tasks SET username = 'Неизвестно' WHERE username IS NULL")
+        conn.commit()
+        logger.info("Миграция завершена: добавлена колонка username.")
+except Exception as e:
+    logger.error(f"Ошибка при проверке/миграции схемы: {e}")
+
+# ==================== ФУНКЦИИ РАБОТЫ С БД ====================
 
 def add_task(user_id, username, task_text):
     """Добавляет новую задачу в БД и возвращает её ID"""
     now = datetime.now().isoformat()
-    cursor.execute(
-        'INSERT INTO tasks (user_id, username, task_text, status, created_at) VALUES (?, ?, ?, ?, ?)',
-        (user_id, username, task_text, 'in_work', now)
-    )
-    conn.commit()
-    return cursor.lastrowid
+    try:
+        cursor.execute(
+            'INSERT INTO tasks (user_id, username, task_text, status, created_at) VALUES (?, ?, ?, ?, ?)',
+            (user_id, username, task_text, 'in_work', now)
+        )
+        conn.commit()
+        task_id = cursor.lastrowid
+        logger.info(f"Задача добавлена: id={task_id}, user_id={user_id}, username={username}")
+        return task_id
+    except Exception as e:
+        logger.error(f"Ошибка записи в БД (add_task): {e}")
+        raise
 
 def get_tasks(user_id, status):
     """Возвращает список задач пользователя с определённым статусом"""
-    cursor.execute(
-        'SELECT id, task_text, created_at, moved_to_waiting_at, completed_at, note, username FROM tasks WHERE user_id = ? AND status = ? ORDER BY id',
-        (user_id, status)
-    )
-    rows = cursor.fetchall()
-    tasks = []
-    for row in rows:
-        tasks.append({
-            'id': row[0],
-            'text': row[1],
-            'created_at': datetime.fromisoformat(row[2]) if row[2] else None,
-            'moved_to_waiting_at': datetime.fromisoformat(row[3]) if row[3] else None,
-            'completed_at': datetime.fromisoformat(row[4]) if row[4] else None,
-            'note': row[5],
-            'username': row[6]
-        })
-    return tasks
+    try:
+        cursor.execute(
+            'SELECT id, task_text, created_at, moved_to_waiting_at, completed_at, note, username '
+            'FROM tasks WHERE user_id = ? AND status = ? ORDER BY id',
+            (user_id, status)
+        )
+        rows = cursor.fetchall()
+        tasks = []
+        for row in rows:
+            tasks.append({
+                'id': row[0],
+                'text': row[1],
+                'created_at': datetime.fromisoformat(row[2]) if row[2] else None,
+                'moved_to_waiting_at': datetime.fromisoformat(row[3]) if row[3] else None,
+                'completed_at': datetime.fromisoformat(row[4]) if row[4] else None,
+                'note': row[5],
+                'username': row[6]
+            })
+        logger.debug(f"get_tasks(user_id={user_id}, status={status}) -> {len(tasks)} записей")
+        return tasks
+    except Exception as e:
+        logger.error(f"Ошибка чтения из БД (get_tasks): {e}")
+        return []
 
 def get_task_by_id(task_id):
     """Возвращает задачу по ID"""
-    cursor.execute(
-        'SELECT id, task_text, created_at, moved_to_waiting_at, completed_at, note, status, username FROM tasks WHERE id = ?',
-        (task_id,)
-    )
-    row = cursor.fetchone()
-    if row:
-        return {
-            'id': row[0],
-            'text': row[1],
-            'created_at': datetime.fromisoformat(row[2]) if row[2] else None,
-            'moved_to_waiting_at': datetime.fromisoformat(row[3]) if row[3] else None,
-            'completed_at': datetime.fromisoformat(row[4]) if row[4] else None,
-            'note': row[5],
-            'status': row[6],
-            'username': row[7]
-        }
-    return None
+    try:
+        cursor.execute(
+            'SELECT id, task_text, created_at, moved_to_waiting_at, completed_at, note, status, username '
+            'FROM tasks WHERE id = ?',
+            (task_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return {
+                'id': row[0],
+                'text': row[1],
+                'created_at': datetime.fromisoformat(row[2]) if row[2] else None,
+                'moved_to_waiting_at': datetime.fromisoformat(row[3]) if row[3] else None,
+                'completed_at': datetime.fromisoformat(row[4]) if row[4] else None,
+                'note': row[5],
+                'status': row[6],
+                'username': row[7]
+            }
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка чтения из БД (get_task_by_id): {e}")
+        return None
 
 def update_task_status(task_id, status, extra_field=None, extra_value=None):
     """Обновляет статус задачи и опционально добавляет дату/пометку"""
-    if extra_field and extra_value is not None:
-        cursor.execute(
-            f'UPDATE tasks SET status = ?, {extra_field} = ? WHERE id = ?',
-            (status, extra_value, task_id)
-        )
-    else:
-        cursor.execute(
-            'UPDATE tasks SET status = ? WHERE id = ?',
-            (status, task_id)
-        )
-    conn.commit()
+    try:
+        if extra_field and extra_value is not None:
+            cursor.execute(
+                f'UPDATE tasks SET status = ?, {extra_field} = ? WHERE id = ?',
+                (status, extra_value, task_id)
+            )
+        else:
+            cursor.execute(
+                'UPDATE tasks SET status = ? WHERE id = ?',
+                (status, task_id)
+            )
+        conn.commit()
+        logger.info(f"Статус задачи id={task_id} изменён на '{status}'")
+    except Exception as e:
+        logger.error(f"Ошибка обновления статуса (update_task_status): {e}")
+        raise
 
 def update_task_note(task_id, note):
     """Обновляет пометку задачи"""
-    cursor.execute('UPDATE tasks SET note = ? WHERE id = ?', (note, task_id))
-    conn.commit()
+    try:
+        cursor.execute('UPDATE tasks SET note = ? WHERE id = ?', (note, task_id))
+        conn.commit()
+        logger.info(f"Пометка для задачи id={task_id} обновлена.")
+    except Exception as e:
+        logger.error(f"Ошибка обновления пометки (update_task_note): {e}")
+        raise
 
 def delete_task(task_id):
     """Удаляет задачу по ID"""
-    cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
-    conn.commit()
+    try:
+        cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        conn.commit()
+        logger.info(f"Задача id={task_id} удалена.")
+    except Exception as e:
+        logger.error(f"Ошибка удаления задачи (delete_task): {e}")
+        raise
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
@@ -148,6 +214,11 @@ def get_username(message: types.Message) -> str:
     if message.from_user.username:
         return f"@{message.from_user.username}"
     return f"User {message.from_user.id}"
+
+# ==================== БОТ И ДИСПЕТЧЕР ====================
+bot = Bot(token=TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
 # ==================== ОБРАБОТЧИКИ ====================
 
@@ -365,11 +436,17 @@ async def process_complete_work(callback: types.CallbackQuery):
         return
 
     now = datetime.now()
-    cursor.execute(
-        'UPDATE tasks SET status = ?, completed_at = ?, note = NULL WHERE id = ?',
-        ('completed', now.isoformat(), task_id)
-    )
-    conn.commit()
+    try:
+        cursor.execute(
+            'UPDATE tasks SET status = ?, completed_at = ?, note = NULL WHERE id = ?',
+            ('completed', now.isoformat(), task_id)
+        )
+        conn.commit()
+        logger.info(f"Задача id={task_id} выполнена (из 'в работе').")
+    except Exception as e:
+        logger.error(f"Ошибка выполнения задачи id={task_id}: {e}")
+        await callback.answer("Ошибка при выполнении задачи", show_alert=True)
+        return
 
     await callback.message.answer(
         f"✅ Задача '{task['text']}' выполнена!\n"
@@ -388,11 +465,17 @@ async def process_complete_waiting(callback: types.CallbackQuery):
         return
 
     now = datetime.now()
-    cursor.execute(
-        'UPDATE tasks SET status = ?, completed_at = ?, note = NULL WHERE id = ?',
-        ('completed', now.isoformat(), task_id)
-    )
-    conn.commit()
+    try:
+        cursor.execute(
+            'UPDATE tasks SET status = ?, completed_at = ?, note = NULL WHERE id = ?',
+            ('completed', now.isoformat(), task_id)
+        )
+        conn.commit()
+        logger.info(f"Задача id={task_id} выполнена (из 'в ожидании').")
+    except Exception as e:
+        logger.error(f"Ошибка выполнения задачи id={task_id}: {e}")
+        await callback.answer("Ошибка при выполнении задачи", show_alert=True)
+        return
 
     await callback.message.answer(
         f"✅ Задача '{task['text']}' выполнена!\n"
@@ -500,7 +583,7 @@ async def main():
     try:
         await dp.start_polling(bot)
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        logger.error(f"Ошибка polling: {e}")
         await asyncio.sleep(5)
         await main()
 
