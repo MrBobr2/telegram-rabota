@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Токен из переменных окружения
-TOKEN = os.getenv("8974370964:AAH9WMk4et1sZGvL_Kmk1ohk4nLzCNzSwQk", "")
+TOKEN = os.getenv("BOT_TOKEN", "")
 
 if not TOKEN:
     logger.error("BOT_TOKEN не установлен!")
