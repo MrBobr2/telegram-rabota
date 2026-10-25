@@ -27,7 +27,7 @@ dp = Dispatcher(storage=storage)
 
 # ==================== РАБОТА С БАЗОЙ ДАННЫХ ====================
 
-conn = sqlite3.connect('tasks.db', check_same_thread=False)
+conn = sqlite3.connect('/data/tasks.db', check_same_thread=False)
 cursor = conn.cursor()
 
 # Создаём таблицу, если её нет
